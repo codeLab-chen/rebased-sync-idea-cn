@@ -13,18 +13,23 @@ $DefaultSearchRoots = @(
     "$env:LOCALAPPDATA\Programs",
     "$env:LOCALAPPDATA\JetBrains\Toolbox\apps",
     "$env:APPDATA\JetBrains"
-)}\JetBrains",
-    "$env:LOCALAPPDATA\Programs",
-    "$env:LOCALAPPDATA\JetBrains\Toolbox\apps",
-    "$env:APPDATA\JetBrains"
-)}\JetBrains",
-    "$env:LOCALAPPDATA\Programs",
-    "$env:LOCALAPPDATA\JetBrains\Toolbox\apps",
-    "$env:APPDATA\JetBrains"
 )
+
+function Normalize-UserPath {
+    param([string]$Path)
+
+    if (-not $Path) { return '' }
+    $value = [Environment]::ExpandEnvironmentVariables($Path.Trim())
+    if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+        $value = $value.Substring(1, $value.Length - 2).Trim()
+    }
+    if ($value.Length -gt 3) { $value = $value.TrimEnd('\', '/') }
+    return $value
+}
 
 function Read-JarPluginXml {
     param([string]$JarPath)
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
     try {
@@ -32,7 +37,8 @@ function Read-JarPluginXml {
         if (-not $entry) { throw "plugin.xml 不存在: $JarPath" }
         $sr = [System.IO.StreamReader]::new($entry.Open(), [System.Text.Encoding]::UTF8)
         try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
-    } finally { $zip.Dispose() }
+    }
+    finally { $zip.Dispose() }
 }
 
 function Get-XmlText {
@@ -50,7 +56,42 @@ function Get-BuildBranch {
 
 function Test-IsExeInstall {
     param([string]$Dir)
-    return Test-Path "$Dir\Uninstall.exe"
+    return Test-Path (Join-Path $Dir 'Uninstall.exe')
+}
+
+function Get-RebasedInfo {
+    param([string]$Path)
+
+    $normalized = Normalize-UserPath $Path
+    if (-not $normalized) { throw 'Rebased 路径不能为空。' }
+    $productJson = Join-Path $normalized 'product-info.json'
+    if (-not (Test-Path -LiteralPath $productJson)) {
+        throw "不是有效的 Rebased 目录（缺少 product-info.json）: $normalized"
+    }
+
+    $info = Get-Content -LiteralPath $productJson -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($info.name -ne 'Rebased' -and $info.envVarBaseName -ne 'REBASED') {
+        throw "目录不是 Rebased: $normalized"
+    }
+
+    $exe = @(
+        (Join-Path $normalized 'bin\rebased64.exe'),
+        (Join-Path $normalized 'rebased64.exe')
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $isExe = Test-IsExeInstall $normalized
+
+    return [pscustomobject]@{
+        Path        = $normalized
+        Version     = [string]$info.version
+        Build       = [string]$info.buildNumber
+        DataDir     = [string]$info.dataDirectoryName
+        Vendor      = [string]$info.productVendor
+        Exe         = $exe
+        IsExe       = $isExe
+        IsZip       = -not $isExe
+        ProductJson = $productJson
+        Modified    = (Get-Item -LiteralPath $productJson).LastWriteTime
+    }
 }
 
 function Find-Rebased {
@@ -60,30 +101,10 @@ function Find-Rebased {
 
     $results = foreach ($root in $SearchRoots) {
         Get-ChildItem $root -Recurse -File -Filter 'product-info.json' -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-                $info = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                if ($info.name -ne 'Rebased' -and $info.envVarBaseName -ne 'REBASED') { return }
-                
-                $dir = $_.Directory.FullName
-                $exe = @("$dir\bin\rebased64.exe", "$dir\rebased64.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-                $isExe = Test-IsExeInstall $dir
-                
-                [pscustomobject]@{
-                    Path        = $dir
-                    Version     = [string]$info.version
-                    Build       = [string]$info.buildNumber
-                    DataDir     = [string]$info.dataDirectoryName
-                    Vendor      = [string]$info.productVendor
-                    Exe         = $exe
-                    IsExe       = $isExe
-                    IsZip       = -not $isExe
-                    ProductJson = $_.FullName
-                    Modified    = $_.LastWriteTime
-                }
-            } catch {}
+            try { Get-RebasedInfo $_.Directory.FullName } catch { return }
         }
     }
-    return @($results | Sort-Object Modified -Descending)
+    return @($results | Group-Object -Property Path | ForEach-Object { $_.Group | Sort-Object -Property Modified -Descending | Select-Object -First 1 } | Sort-Object -Property Modified -Descending)
 }
 
 function Find-ChinesePlugin {
@@ -99,11 +120,11 @@ function Find-ChinesePlugin {
             if ($ExcludeUnder -and $_.FullName.StartsWith($ExcludeUnder, [StringComparison]::OrdinalIgnoreCase)) { return }
             if ($_.FullName -match '[\\/]_localization-zh-backups[\\/]') { return }
             if ($_.Extension -eq '.bak') { return }
-            
+
             try {
                 $xml = Read-JarPluginXml $_.FullName
                 if ($xml -notmatch '<id>\s*com\.intellij\.zh\s*</id>') { return }
-                
+
                 $pluginDir = $_.Directory.Parent.FullName
                 [pscustomobject]@{
                     Path       = $pluginDir
@@ -113,40 +134,34 @@ function Find-ChinesePlugin {
                     UntilBuild = if ($xml -match 'until-build="([^"]+)"') { $Matches[1] } else { '' }
                     Modified   = $_.LastWriteTime
                 }
-            } catch {}
+            }
+            catch {}
         }
     }
-    return @($results | Sort-Object Modified -Descending)
+    return @($results | Group-Object -Property Path | ForEach-Object { $_.Group | Sort-Object -Property Modified -Descending | Select-Object -First 1 } | Sort-Object -Property Modified -Descending)
 }
 
 function Resolve-PluginDir {
     param($Rebased)
-    
+
     if ($Rebased.IsZip) {
-        # ZIP: idea.plugins.path = ${idea.config.path}/plugins = config/plugins/
-        return "$($Rebased.Path)\config\plugins"
+        return (Join-Path $Rebased.Path 'config\plugins')
     }
-    else {
-        # EXE: AppData
-        return "$env:APPDATA\$($Rebased.Vendor)\$($Rebased.DataDir)\plugins"
-    }
+    return (Join-Path (Join-Path $env:APPDATA $Rebased.Vendor) "$($Rebased.DataDir)\plugins")
 }
 
 function Resolve-ConfigDir {
     param($Rebased)
-    
+
     if ($Rebased.IsZip) {
-        # ZIP: idea.config.path = config/
         return [pscustomobject]@{
-            IdeGeneral = "$($Rebased.Path)\config\options\ide.general.xml"
+            IdeGeneral = Join-Path $Rebased.Path 'config\options\ide.general.xml'
         }
     }
-    else {
-        # EXE: AppData
-        $base = "$env:APPDATA\$($Rebased.Vendor)\$($Rebased.DataDir)"
-        return [pscustomobject]@{
-            IdeGeneral = "$base\options\ide.general.xml"
-        }
+
+    $base = Join-Path (Join-Path $env:APPDATA $Rebased.Vendor) $Rebased.DataDir
+    return [pscustomobject]@{
+        IdeGeneral = Join-Path $base 'options\ide.general.xml'
     }
 }
 

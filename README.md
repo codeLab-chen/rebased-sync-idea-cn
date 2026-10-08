@@ -13,6 +13,7 @@
         ├── discovery.ps1           路径发现
         ├── plugin.ps1              插件复制与修补
         ├── config.ps1              配置文件修改
+        ├── migration.ps1           旧版到新版迁移
         └── pack.ps1                ZIP 打包
 ```
 
@@ -25,13 +26,39 @@
   Rebased 中文语言包配置工具
 =======================================================
 
-如何定位 Rebased 和语言包？
+请选择操作:
 
-  [1] 自动搜索
-  [2] 手动指定路径
+  [1] 迁移旧版中文配置到新版 Rebased
+  [2] 同步中文语言包
   [0] 退出
 ```
 
+选择 `[1]` 进入迁移模式；选择 `[2]` 进入原来的中文语言包同步模式。
+
+## 旧版迁移到新版
+
+适用于已经配置好中文、只是下载了新的 Rebased 版本的情况。
+
+选择启动菜单中的：
+
+```text
+[1] 迁移旧版中文配置到新版 Rebased
+```
+
+脚本会自动搜索 Rebased 安装目录，列出版本和 build，依次让你选择：
+
+1. 旧版本 Rebased
+2. 新版本 Rebased
+
+迁移只处理以下内容：
+
+- 旧版 `localization-zh-from-idea` 或 `localization-zh` → 新版 `localization-zh`
+- 新版 `config/options/ide.general.xml` 中的 `selectedLocale = zh-CN`
+- 按新版 build 分支重新修补 `until-build`
+
+迁移不会覆盖新版的 `bin`、`lib`、`modules`、内置 `plugins`、`jbr`、`system`，也不会用旧版配置文件替换新版整个 `config`。新版已有的中文插件副本和旧审计副本会被删除，不创建备份。ZIP 版本还会自动启用 `bin\idea.properties` 的便携路径，避免继续读取 AppData 中的旧插件。
+
+如果新旧版本共用同一个 EXE 数据目录，脚本会提示无需迁移；这种情况下新版通常已经自动复用了旧配置。
 ### 第 1 步：选择发现方式
 
 - `[1] 自动搜索` — 扫描常用目录，列出找到的 Rebased 和语言包
@@ -97,14 +124,13 @@
   [0] 退出
 ```
 
-## 执行过程
+## 同步中文语言包执行过程
 
 选择安装后，脚本依次执行：
 
 1. **安全检查** — 确认 Rebased 未运行
 2. **三步复制**
-   - IDEA 插件 → `localization-zh-from-idea`（审计副本，保留原始 JAR）
-   - 审计副本 → `localization-zh`（工作副本）
+   - IDEA 插件 → `config\plugins\localization-zh`（唯一活动插件）
 3. **修补兼容性** — 修改 JAR 内 `META-INF/plugin.xml`，`until-build` 放宽为分支通配符（如 `262.*`）
 4. **配置中文** — 写入 `ide.general.xml`，设置 `selectedLocale = zh-CN`
 
@@ -120,11 +146,9 @@
 
 选 `[2]` 安装 + 打包，配置完成后自动生成 `rebased.win(1)-v1.1.17-cn.zip`。解压后运行 `bin\rebased64.exe` 即为中文界面，无需额外配置。
 
-## 备份与恢复
+## 迁移时的清理行为
 
-脚本自动备份：
-- 已有插件 → `_localization-zh-backups\localization-zh-<时间戳>\`
-- JAR 修补前 → `.bak-<时间戳>.jar`
+脚本不创建插件备份、审计副本或 `.bak` JAR。迁移/同步前会删除目标目录中的旧 `localization-zh`、`localization-zh-from-idea` 和旧审计目录，然后只写入一个活动中文插件。
 
 ## 启动后操作
 

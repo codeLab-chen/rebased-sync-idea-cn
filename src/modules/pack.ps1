@@ -47,6 +47,7 @@ function New-PortableZip {
     
     if (Test-Path $OutputZip) { Remove-Item $OutputZip -Force }
     
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::Open($OutputZip, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
