@@ -50,6 +50,8 @@
 1. 旧版本 Rebased
 2. 新版本 Rebased
 
+搜索结果不足两个时也可以继续，输入 `M` 手动指定旧版或新版目录；手动查找失败后可重新输入或退出。
+
 迁移只处理以下内容：
 
 - 旧版 `localization-zh-from-idea` 或 `localization-zh` → 新版 `localization-zh`
@@ -62,8 +64,16 @@
 ### 第 1 步：选择发现方式
 
 - `[1] 自动搜索` — 扫描常用目录，列出找到的 Rebased 和语言包
-- `[2] 手动指定路径` — 直接输入 Rebased 和语言包的路径
+- `[2] 手动指定路径` — 输入 Rebased 路径，再选择自动搜索语言包或手动输入 IDEA 安装目录
 - `[0] 退出`
+
+手动指定语言包时，直接输入 IDEA 安装目录即可，例如 `C:\home\codeApp\IntelliJ IDEA 2026.2.3`，脚本会定位到 `plugins\localization-zh\lib\localization-zh.jar`。也兼容 `plugins`、`localization-zh`、`lib` 目录和 JAR 文件路径，支持带引号的路径。
+
+Rebased 和 IDEA 都支持输入安装目录的上一级，例如 `C:\home\codeApp`。脚本会先验证当前目录，再检查下一层名称包含 `rebased` 或 `IntelliJ IDEA` 的文件夹；改名的安装目录也可通过 `product-info.json` 识别。Rebased 必须通过产品信息验证，语言包必须包含有效的简体中文插件。
+
+找到多个匹配时会列出所有有效结果，显示完整路径、Rebased 版本和 build，或语言包版本和兼容范围。即使文件夹部分重名或版本相同，也需选择具体编号；输入 `M` 可重新指定路径，输入 `0` 退出，不会自动选择第一个。
+
+Rebased 或语言包查找失败后都会提示 `[1] 重新输入路径`、`[0] 退出`，不会直接结束脚本。自动搜索未找到时会转入手动输入；搜索结果列表也可输入 `M` 手动指定路径。
 
 ### 第 2 步：选择具体实例
 
@@ -160,6 +170,7 @@
 
 - `C:\迅雷下载`
 - `C:\home\app\devApp`
+- `C:\home\codeApp`（语言包搜索）
 - `%USERPROFILE%\Downloads`
 - `%USERPROFILE%\Desktop`
 - `D:\`、`E:\`

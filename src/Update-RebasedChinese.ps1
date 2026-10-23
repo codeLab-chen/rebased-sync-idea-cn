@@ -30,12 +30,16 @@ function Select-Rebased {
         [string]$Prompt
     )
 
-    $pick = Read-Host $Prompt
-    if ($pick -eq '0') { return $null }
-    if ($pick -notmatch '^\d+$') { throw '选择必须是数字。' }
-    $index = [int]$pick - 1
-    if ($index -lt 0 -or $index -ge $Items.Count) { throw '选择超出范围。' }
-    return $Items[$index]
+    while ($true) {
+        $pick = Read-Host $Prompt
+        if ($pick -eq '0') { return $null }
+        if ($pick -eq 'M') { return (Read-RebasedPath) }
+        if ($pick -match '^\d+$' -and $pick.Length -lt 10) {
+            $index = [int]$pick - 1
+            if ($index -ge 0 -and $index -lt $Items.Count) { return $Items[$index] }
+        }
+        Write-Host '无效选择，请输入列表中的编号、M 或 0。'
+    }
 }
 
 function Invoke-MigrationMode {
@@ -48,12 +52,13 @@ function Invoke-MigrationMode {
 
     $rebasedList = @(Find-Rebased)
     if ($rebasedList.Count -lt 2) {
-        throw "至少需要找到 2 个 Rebased，当前找到 $($rebasedList.Count) 个。"
+        Write-Host "自动搜索找到 $($rebasedList.Count) 个 Rebased，可输入 M 手动指定旧版或新版路径。"
     }
 
     Write-Host ''
     Write-Host "找到 $($rebasedList.Count) 个 Rebased:"
     Show-RebasedList $rebasedList
+    Write-Host '  [M] 手动输入 Rebased 安装目录或上一级目录'
     Write-Host '  [0] 退出'
     Write-Host ''
 
@@ -95,6 +100,76 @@ function Invoke-MigrationMode {
     Read-Host '按回车键退出'
 }
 
+function Read-InstallationPath {
+    param([ValidateSet('Rebased', 'ChinesePlugin')][string]$Kind)
+
+    while ($true) {
+        $prompt = if ($Kind -eq 'Rebased') { '  输入 Rebased 安装目录或上一级目录' } else { '  输入 IDEA 安装目录、上一级目录或语言包路径' }
+        $path = Read-Host $prompt
+        if ($path.Trim() -eq '0') { return $null }
+        try {
+            $items = @(if ($Kind -eq 'Rebased') { Find-RebasedAtPath $path } else { Find-ChinesePluginAtPath $path })
+        }
+        catch {
+            Write-Host "  查找失败: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host '  [1] 重新输入路径'
+            Write-Host '  [0] 退出'
+            do {
+                $retry = Read-Host '  输入数字'
+                if ($retry -notin @('0', '1')) { Write-Host '  无效选择，请输入 1 或 0。' }
+            } while ($retry -notin @('0', '1'))
+            if ($retry -eq '0') { return $null }
+            continue
+        }
+
+        if ($items.Count -eq 1) {
+            Write-Host "  已找到: $($items[0].Path)"
+            return $items[0]
+        }
+        Write-Host "  找到 $($items.Count) 个匹配，请根据完整路径和版本选择:"
+        if ($Kind -eq 'Rebased') { Show-RebasedList $items }
+        else {
+            for ($i = 0; $i -lt $items.Count; $i++) {
+                Write-Host "  [$($i + 1)] $($items[$i].Path)"
+                Write-Host "      版本: $($items[$i].Version)  兼容: $($items[$i].SinceBuild) ~ $($items[$i].UntilBuild)"
+            }
+        }
+        Write-Host '  [M] 重新输入路径'
+        Write-Host '  [0] 退出'
+        while ($true) {
+            $pick = Read-Host '  选择编号'
+            if ($pick -eq '0') { return $null }
+            if ($pick -eq 'M') { break }
+            if ($pick -match '^\d+$' -and $pick.Length -lt 10) {
+                $index = [int]$pick - 1
+                if ($index -ge 0 -and $index -lt $items.Count) { return $items[$index] }
+            }
+            Write-Host '  无效选择，请输入列表中的编号、M 或 0。'
+        }
+    }
+}
+
+function Read-RebasedPath {
+    Write-Host ''
+    Write-Host '  支持 Rebased 安装目录（内含 product-info.json），或它的上一级目录。'
+    Write-Host '  例如 C:\Apps、C:\Apps\Rebased、C:\Apps\rebased.win；输入 0 退出。'
+    Write-Host '  会检查下一层包含 rebased 的文件夹或有产品信息的文件夹；多个结果会列出供选择。'
+    return (Read-InstallationPath -Kind Rebased)
+}
+
+function Read-ChinesePlugin {
+    Write-Host ''
+    Write-Host '  输入 IDEA 安装目录或上一级目录，脚本会自动定位中文语言包。'
+    Write-Host '  路径层级示例（以下任意一层都可以）:'
+    Write-Host '    C:\Apps'
+    Write-Host '    C:\Apps\IntelliJ IDEA 2026.2.3'
+    Write-Host '    C:\Apps\IntelliJ IDEA 2026.2.3\plugins'
+    Write-Host '    C:\Apps\IntelliJ IDEA 2026.2.3\plugins\localization-zh'
+    Write-Host '  也支持 lib 目录或 localization-zh.jar 文件路径；输入 0 退出。'
+    Write-Host '  会检查下一层 IntelliJ IDEA 文件夹（也通过产品信息识别 IDEA）；多个结果会列出供选择。'
+    return (Read-InstallationPath -Kind ChinesePlugin)
+}
+
 function Invoke-SyncMode {
     Write-Host ''
     Write-Host ('=' * 55)
@@ -112,20 +187,18 @@ function Invoke-SyncMode {
     if ($searchMode -eq '0') { return }
     if ($searchMode -notin @('1', '2')) { throw '无效选择。' }
 
-    $rebasedPath = $null
-    $pluginPath = $null
+    $selectedRebased = $null
+    $selectedPlugin = $null
 
     if ($searchMode -eq '2') {
-        $rebasedPath = Normalize-UserPath (Read-Host '  输入 Rebased 目录路径')
-        $selectedRebased = Get-RebasedInfo $rebasedPath
+        $selectedRebased = Read-RebasedPath
+        if (-not $selectedRebased) { return }
         Write-Host ''
         Write-Host '  语言包: [1] 自动搜索  [2] 手动指定'
         $pluginMode = Read-Host '  输入数字'
         if ($pluginMode -eq '2') {
-            $pluginPath = Normalize-UserPath (Read-Host '  输入语言包目录路径')
-            if (-not (Test-Path (Join-Path $pluginPath 'lib\localization-zh.jar'))) {
-                throw "语言包路径无效: $pluginPath"
-            }
+            $selectedPlugin = Read-ChinesePlugin
+            if (-not $selectedPlugin) { return }
         }
     }
 
@@ -134,43 +207,50 @@ function Invoke-SyncMode {
 
     if (-not $selectedRebased) {
         $rebasedList = @(Find-Rebased)
-        if ($rebasedList.Count -eq 0) { throw '未找到 Rebased。' }
-        Write-Host ''
-        Write-Host "找到 $($rebasedList.Count) 个 Rebased:"
-        Show-RebasedList $rebasedList
-        Write-Host '  [0] 退出'
-        $selectedRebased = Select-Rebased $rebasedList '选择 Rebased 编号'
+        if ($rebasedList.Count -eq 0) {
+            Write-Host '自动搜索未找到 Rebased，请手动指定安装目录或上一级目录。'
+            $selectedRebased = Read-RebasedPath
+        }
+        else {
+            Write-Host ''
+            Write-Host "找到 $($rebasedList.Count) 个 Rebased:"
+            Show-RebasedList $rebasedList
+            Write-Host '  [M] 手动输入 Rebased 安装目录或上一级目录'
+            Write-Host '  [0] 退出'
+            $selectedRebased = Select-Rebased $rebasedList '选择 Rebased 编号'
+        }
         if (-not $selectedRebased) { return }
     }
 
-    if ($pluginPath) {
-        $xml = Read-JarPluginXml (Join-Path $pluginPath 'lib\localization-zh.jar')
-        $sb = if ($xml -match 'since-build="([^"]+)"') { $Matches[1] } else { '' }
-        $ub = if ($xml -match 'until-build="([^"]+)"') { $Matches[1] } else { '' }
-        $selectedPlugin = [pscustomobject]@{
-            Path       = $pluginPath
-            Jar        = Join-Path $pluginPath 'lib\localization-zh.jar'
-            Version    = Get-XmlText $xml 'version'
-            SinceBuild = $sb
-            UntilBuild = $ub
-        }
-    }
-    else {
+    if (-not $selectedPlugin) {
         $pluginList = @(Find-ChinesePlugin -ExcludeUnder $selectedRebased.Path)
-        if ($pluginList.Count -eq 0) { throw '未找到中文语言包。' }
-        Write-Host ''
-        Write-Host "找到 $($pluginList.Count) 个中文语言包:"
-        for ($i = 0; $i -lt $pluginList.Count; $i++) {
-            Write-Host "  [$($i + 1)] $($pluginList[$i].Path)"
-            Write-Host "      版本: $($pluginList[$i].Version)  兼容: $($pluginList[$i].SinceBuild) ~ $($pluginList[$i].UntilBuild)"
+        if ($pluginList.Count -eq 0) {
+            Write-Host '自动搜索未找到中文语言包，请手动指定 IDEA 安装目录。'
+            $selectedPlugin = Read-ChinesePlugin
+            if (-not $selectedPlugin) { return }
         }
-        Write-Host '  [0] 退出'
-        $pick = Read-Host '  选择语言包编号'
-        if ($pick -eq '0') { return }
-        if ($pick -notmatch '^\d+$') { throw '选择必须是数字。' }
-        $pluginIndex = [int]$pick - 1
-        if ($pluginIndex -lt 0 -or $pluginIndex -ge $pluginList.Count) { throw '选择超出范围。' }
-        $selectedPlugin = $pluginList[$pluginIndex]
+        else {
+            Write-Host ''
+            Write-Host "找到 $($pluginList.Count) 个中文语言包:"
+            for ($i = 0; $i -lt $pluginList.Count; $i++) {
+                Write-Host "  [$($i + 1)] $($pluginList[$i].Path)"
+                Write-Host "      版本: $($pluginList[$i].Version)  兼容: $($pluginList[$i].SinceBuild) ~ $($pluginList[$i].UntilBuild)"
+            }
+            Write-Host '  [M] 手动输入 IDEA 安装目录或语言包路径'
+            Write-Host '  [0] 退出'
+            $pick = Read-Host '  选择语言包编号'
+            if ($pick -eq '0') { return }
+            if ($pick -eq 'M') {
+                $selectedPlugin = Read-ChinesePlugin
+                if (-not $selectedPlugin) { return }
+            }
+            else {
+                if ($pick -notmatch '^\d+$') { throw '选择必须是数字。' }
+                $pluginIndex = [int]$pick - 1
+                if ($pluginIndex -lt 0 -or $pluginIndex -ge $pluginList.Count) { throw '选择超出范围。' }
+                $selectedPlugin = $pluginList[$pluginIndex]
+            }
+        }
     }
 
     $pluginsDir = Resolve-PluginDir $selectedRebased

@@ -97,14 +97,33 @@ function Get-RebasedInfo {
 function Find-Rebased {
     param([string[]]$SearchRoots)
     if (-not $SearchRoots) { $SearchRoots = $DefaultSearchRoots }
-    $SearchRoots = @($SearchRoots | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+    $SearchRoots = @($SearchRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
 
     $results = foreach ($root in $SearchRoots) {
-        Get-ChildItem $root -Recurse -File -Filter 'product-info.json' -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'product-info.json' -ErrorAction SilentlyContinue | ForEach-Object {
             try { Get-RebasedInfo $_.Directory.FullName } catch { return }
         }
     }
     return @($results | Group-Object -Property Path | ForEach-Object { $_.Group | Sort-Object -Property Modified -Descending | Select-Object -First 1 } | Sort-Object -Property Modified -Descending)
+}
+
+function Find-RebasedAtPath {
+    param([string]$Path)
+
+    $normalized = Normalize-UserPath $Path
+    if (-not $normalized) { throw 'Rebased 路径不能为空。' }
+    if (-not (Test-Path -LiteralPath $normalized -PathType Container)) { throw "目录不存在: $normalized" }
+    $directory = Get-Item -LiteralPath $normalized
+    try { return (Get-RebasedInfo $directory.FullName) } catch {}
+
+    $results = @(foreach ($child in (Get-ChildItem -LiteralPath $directory.FullName -Directory)) {
+        if ($child.Name -notlike '*rebased*' -and -not (Test-Path -LiteralPath (Join-Path $child.FullName 'product-info.json') -PathType Leaf)) { continue }
+        try { Get-RebasedInfo $child.FullName } catch { continue }
+    })
+    if ($results.Count -eq 0) {
+        throw "未找到 Rebased: $normalized。已检查当前目录及下一层子文件夹（如 Rebased、rebased.win），安装目录需包含有效的 Rebased product-info.json。"
+    }
+    return $results
 }
 
 function Find-ChinesePlugin {
@@ -112,33 +131,100 @@ function Find-ChinesePlugin {
         [string[]]$SearchRoots,
         [string]$ExcludeUnder
     )
-    if (-not $SearchRoots) { $SearchRoots = $DefaultSearchRoots }
-    $SearchRoots = @($SearchRoots | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+    if (-not $SearchRoots) { $SearchRoots = @('C:\home\codeApp') + $DefaultSearchRoots }
+    $SearchRoots = @($SearchRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
 
     $results = foreach ($root in $SearchRoots) {
-        Get-ChildItem $root -Recurse -File -Filter 'localization-zh.jar' -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'localization-zh.jar' -ErrorAction SilentlyContinue | ForEach-Object {
             if ($ExcludeUnder -and $_.FullName.StartsWith($ExcludeUnder, [StringComparison]::OrdinalIgnoreCase)) { return }
             if ($_.FullName -match '[\\/]_localization-zh-backups[\\/]') { return }
             if ($_.Extension -eq '.bak') { return }
 
             try {
-                $xml = Read-JarPluginXml $_.FullName
-                if ($xml -notmatch '<id>\s*com\.intellij\.zh\s*</id>') { return }
-
-                $pluginDir = $_.Directory.Parent.FullName
-                [pscustomobject]@{
-                    Path       = $pluginDir
-                    Jar        = $_.FullName
-                    Version    = Get-XmlText $xml 'version'
-                    SinceBuild = if ($xml -match 'since-build="([^"]+)"') { $Matches[1] } else { '' }
-                    UntilBuild = if ($xml -match 'until-build="([^"]+)"') { $Matches[1] } else { '' }
-                    Modified   = $_.LastWriteTime
-                }
+                Get-ChinesePluginInfo $_.FullName
             }
             catch {}
         }
     }
     return @($results | Group-Object -Property Path | ForEach-Object { $_.Group | Sort-Object -Property Modified -Descending | Select-Object -First 1 } | Sort-Object -Property Modified -Descending)
+}
+
+function Get-ChinesePluginInfo {
+    param([string]$Path)
+
+    $normalized = Normalize-UserPath $Path
+    if (-not $normalized) { throw '语言包路径不能为空，请输入 IDEA 安装目录或 localization-zh 目录。' }
+    if (-not (Test-Path -LiteralPath $normalized)) { throw "路径不存在: $normalized" }
+
+    $item = Get-Item -LiteralPath $normalized
+    $candidates = if ($item.PSIsContainer) {
+        @(
+            (Join-Path $item.FullName 'plugins\localization-zh\lib\localization-zh.jar'),
+            (Join-Path $item.FullName 'localization-zh\lib\localization-zh.jar'),
+            (Join-Path $item.FullName 'lib\localization-zh.jar'),
+            (Join-Path $item.FullName 'localization-zh.jar')
+        )
+    }
+    else { @($item.FullName) }
+
+    $jar = $null
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        $file = Get-Item -LiteralPath $candidate
+        if ($file.Name -eq 'localization-zh.jar' -and $file.Directory.Name -eq 'lib') {
+            $jar = $file
+            break
+        }
+    }
+    if (-not $jar) {
+        throw "未找到中文语言包: $normalized。请选择 IDEA 安装目录（内含 plugins\localization-zh\lib\localization-zh.jar），或 localization-zh 目录（内含 lib\localization-zh.jar）。"
+    }
+
+    $xml = Read-JarPluginXml $jar.FullName
+    if ($xml -notmatch '<id>\s*com\.intellij\.zh\s*</id>') {
+        throw "该文件不是简体中文语言包（com.intellij.zh）: $($jar.FullName)"
+    }
+    return [pscustomobject]@{
+        Path       = $jar.Directory.Parent.FullName
+        Jar        = $jar.FullName
+        Version    = Get-XmlText $xml 'version'
+        SinceBuild = if ($xml -match 'since-build="([^"]+)"') { $Matches[1] } else { '' }
+        UntilBuild = if ($xml -match 'until-build="([^"]+)"') { $Matches[1] } else { '' }
+        Modified   = $jar.LastWriteTime
+    }
+}
+
+function Find-ChinesePluginAtPath {
+    param([string]$Path)
+
+    $normalized = Normalize-UserPath $Path
+    if (-not $normalized) { throw '语言包路径不能为空，请输入 IDEA 安装目录或其上一级目录。' }
+    if (-not (Test-Path -LiteralPath $normalized)) { throw "路径不存在: $normalized" }
+    try { return (Get-ChinesePluginInfo $normalized) }
+    catch {
+        if (-not (Test-Path -LiteralPath $normalized -PathType Container)) { throw }
+        $directError = $_.Exception.Message
+    }
+
+    $results = @(foreach ($child in (Get-ChildItem -LiteralPath $normalized -Directory)) {
+        $isIdea = $child.Name -like '*IntelliJ IDEA*'
+        if (-not $isIdea) {
+            $productJson = Join-Path $child.FullName 'product-info.json'
+            if (Test-Path -LiteralPath $productJson -PathType Leaf) {
+                try {
+                    $info = Get-Content -LiteralPath $productJson -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $isIdea = $info.name -like '*IntelliJ IDEA*'
+                }
+                catch { continue }
+            }
+        }
+        if (-not $isIdea) { continue }
+        try { Get-ChinesePluginInfo $child.FullName } catch { continue }
+    })
+    if ($results.Count -eq 0) {
+        throw "$directError 已检查下一层名称包含 IntelliJ IDEA 或产品信息确认为 IDEA 的子文件夹，未找到有效中文语言包。"
+    }
+    return $results
 }
 
 function Resolve-PluginDir {
